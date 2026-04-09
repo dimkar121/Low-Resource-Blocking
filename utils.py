@@ -30,9 +30,9 @@ def load_data_pandas(folder_path, left_file, right_file, matches_file,
     # Read CSVs
     if "test_dblp" in path_l:
        COLS_TO_USE = ["id","author1","author2","title","year"]
-       df_left = pd.read_csv(path_l, encoding=encoding, names=COLS_TO_USE,sep=sep, on_bad_lines='skip',  nrows=100_000)
-       df_right = pd.read_csv(path_r, encoding=encoding, names=COLS_TO_USE,sep=sep,on_bad_lines='skip',  nrows=100_000)
-       df_matches = pd.read_csv(path_m, encoding=encoding, sep=sep_truth, nrows=50_000)
+       df_left = pd.read_csv(path_l, encoding=encoding, names=COLS_TO_USE,sep=sep, on_bad_lines='skip')
+       df_right = pd.read_csv(path_r, encoding=encoding, names=COLS_TO_USE,sep=sep,on_bad_lines='skip')
+       df_matches = pd.read_csv(path_m, encoding=encoding, sep=sep_truth)
     else:
        df_left = pd.read_csv(path_l, encoding=encoding, sep=sep)
        df_right = pd.read_csv(path_r, encoding=encoding, sep=sep)
