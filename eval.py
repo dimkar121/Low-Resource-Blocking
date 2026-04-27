@@ -11,6 +11,8 @@ from sentence_transformers.evaluation import BinaryClassificationEvaluator
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import linear_kernel
 
 # --- Import from utils (or fallback) ---
 try:
@@ -47,7 +49,8 @@ TASKS = [
         "left": "Abt.csv", "right": "Buy.csv", "matches": "truth_abt_buy.csv",
         "encoding": "unicode_escape", "sep_truth": ",", "sep" :",",
         "match_left_col": "idAbt", "match_right_col": "idBuy",
-        "left_cols": ["name", "description"], "right_cols": ["name","description"]
+        "left_cols": ["name", "description"], "right_cols": ["name","description"],
+        "left_cols_tfidf": ["name"], "right_cols_tfidf": ["name"],
     },
     {
           "name":"ACM-DBLP",
@@ -94,39 +97,69 @@ TASKS = [
 ]
 
 # --- HELPER: Create Pos+Neg InputExamples AND track explicitly generated pairs ---
-def create_examples_and_track(df_left, df_right, df_matches, left_cols, right_cols, neg_ratio=1):
+def create_examples_and_track(df_left, df_right, df_matches, left_cols, right_cols, tfidf_left_cols=None, tfidf_right_cols=None, neg_ratio=1):
     examples = []
-    pairs_used = set() # Track all explicit pairs to prevent leakage in FAISS eval
-    valid_right_ids = list(df_right.index)
+    pairs_used = set()
+    if tfidf_left_cols is None:
+          tfidf_left_cols = left_cols
+          tfidf_right_cols = right_cols
+    print(f"Left TF-IDF columns={tfidf_left_cols}, right TF-IDF columns={tfidf_right_cols}")
+    corpus_ids = list(df_right.index)
     
-    left_cache = {}
+    # 1. Prepare Corpus specifically for TF-IDF (e.g., ONLY the 'name' column)
+    corpus_texts_for_tfidf = [serialize_row(df_right.loc[rid], columns=tfidf_right_cols) for rid in corpus_ids]
+    
+    # 2. Build TF-IDF Index using the narrow attributes
+    vectorizer = TfidfVectorizer(stop_words='english')
+    tfidf_matrix = vectorizer.fit_transform(corpus_texts_for_tfidf)
+    
+    # 3. Cache the FULL Left texts for training, and NARROW Left texts for searching
+    left_cache_full = {}
+    left_cache_tfidf = {}
     for lid in df_matches['left_id'].unique():
         if lid in df_left.index:
-            left_cache[lid] = serialize_row(df_left.loc[lid], columns=left_cols)
+            left_cache_full[lid] = serialize_row(df_left.loc[lid], columns=left_cols)
+            left_cache_tfidf[lid] = serialize_row(df_left.loc[lid], columns=tfidf_left_cols)
     
     for _, row in df_matches.iterrows():
         lid, rid = row['left_id'], row['right_id']
         
-        if lid not in left_cache or rid not in df_right.index:
+        if lid not in left_cache_full or rid not in df_right.index:
             continue
             
-        text_l = left_cache[lid]
-        text_r = serialize_row(df_right.loc[rid], columns=right_cols)
+        # These are the FULL texts (Name + Description) that the model will actually learn from
+        text_l_full = left_cache_full[lid]
+        text_r_full = serialize_row(df_right.loc[rid], columns=right_cols)
         
-        # 1. Positive Pair
-        examples.append(InputExample(texts=[text_l, text_r], label=1))
+        # 1. Positive Pair (using full text)
+        examples.append(InputExample(texts=[text_l_full, text_r_full], label=1))
         pairs_used.add((lid, rid))
         
-        # 2. Random Negative Pairs
-        for _ in range(neg_ratio):
-            rand_rid = random.choice(valid_right_ids)
-            if rand_rid == rid: continue 
+        # 2. Hard Negative Pairs (Searching using ONLY the narrow text)
+        text_l_narrow = left_cache_tfidf[lid]
+        query_vec = vectorizer.transform([text_l_narrow])
+        cosine_similarities = linear_kernel(query_vec, tfidf_matrix).flatten()
+        
+        top_indices = cosine_similarities.argsort()[-(neg_ratio + 5):][::-1]
+        
+        negatives_added = 0
+        for idx in top_indices:
+            hard_neg_rid = corpus_ids[idx]
             
-            text_neg = serialize_row(df_right.loc[rand_rid], columns=right_cols)
-            examples.append(InputExample(texts=[text_l, text_neg], label=0))
-            pairs_used.add((lid, rand_rid))
+            if hard_neg_rid == rid: 
+                continue 
+            
+            # The model must learn from the FULL text of the negative item, not just its name!
+            text_neg_full = serialize_row(df_right.loc[hard_neg_rid], columns=right_cols)
+            examples.append(InputExample(texts=[text_l_full, text_neg_full], label=0))
+            pairs_used.add((lid, hard_neg_rid))
+            
+            negatives_added += 1
+            if negatives_added >= neg_ratio:
+                break
             
     return examples, pairs_used
+
 
 
 # --- HELPER: Evaluation using FAISS HNSW ---
@@ -139,12 +172,27 @@ def evaluate_with_faiss_hnsw(model, df_l, df_r, test_matches_df, seen_pairs, val
     5. Classify the remaining pairs using the optimal threshold.
     """
     # 1. Get Optimal Threshold from Validation set
-    if hasattr(valid_evaluator, "compute_metrices"):
-        val_metrics = valid_evaluator.compute_metrices(model)
-    else:
-        val_metrics = valid_evaluator.compute_metrics(model)
+    #if hasattr(valid_evaluator, "compute_metrices"):
+    #    val_metrics = valid_evaluator.compute_metrices(model)
+    #else:
+    #    val_metrics = valid_evaluator.compute_metrics(model)
+     
+    val_metrics = valid_evaluator(model)
         
-    optimal_threshold = val_metrics.get('f1_threshold', 0.5)
+    #optimal_threshold = val_metrics.get('valid-eval_cossim_f1_threshold', 0.5)
+    # DEBUG: Print the keys so you can see exactly what your version outputs
+    print(f"    [DEBUG] Available metrics: {list(val_metrics.keys())}")
+        
+    # 2. Dynamically hunt down the correct threshold key
+    optimal_threshold = 0.5 # Default fallback
+    for key, value in val_metrics.items():
+        # Look for any key that contains both "f1_threshold" and "cos" (catches cosine or cossim)
+        if 'f1_threshold' in key and 'cos' in key:
+            optimal_threshold = float(value)
+            print(f"    [DEBUG] Successfully extracted threshold: {optimal_threshold:.4f} (from key: '{key}')")
+            break
+
+    
 
     # 2. Prepare Corpus (Right Dataset)
     corpus_ids = list(df_r.index)
@@ -234,7 +282,8 @@ def run_training_cycle(model_name, base_model, df_l, df_r, df_train_pool, df_val
     
     print(f"    Preparing Validation set & Evaluator...")
     # Extract validation pairs and explicitly track them
-    valid_examples, valid_pairs = create_examples_and_track(df_l, df_r, df_valid, task_info['left_cols'], task_info['right_cols'], neg_ratio=NEG_RATIO)
+    valid_examples, valid_pairs = create_examples_and_track(df_l, df_r, df_valid, task_info['left_cols'], task_info['right_cols'], 
+                                  tfidf_left_cols=task_info["left_cols_tfidf"], tfidf_right_cols=task_info["right_cols_tfidf"], neg_ratio=NEG_RATIO)
     valid_evaluator = BinaryClassificationEvaluator.from_input_examples(valid_examples, batch_size=BATCH_SIZE, name='valid-eval')
 
     for fraction in TRAIN_FRACTIONS:
@@ -271,7 +320,9 @@ def run_training_cycle(model_name, base_model, df_l, df_r, df_train_pool, df_val
         if n_samples < 2: n_samples = 2
         
         df_train_sub = df_train_pool.sample(n=n_samples, random_state=42)
-        train_examples, train_pairs = create_examples_and_track(df_l, df_r, df_train_sub, task_info['left_cols'], task_info['right_cols'], neg_ratio=NEG_RATIO)
+        train_examples, train_pairs = create_examples_and_track(df_l, df_r, df_train_sub, task_info['left_cols'], task_info['right_cols'], 
+        tfidf_left_cols=task_info["left_cols_tfidf"], tfidf_right_cols=task_info["right_cols_tfidf"],
+        neg_ratio=NEG_RATIO)
         train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=BATCH_SIZE)
         
         # Merge Train and Val pairs to prevent leakage during FAISS search
