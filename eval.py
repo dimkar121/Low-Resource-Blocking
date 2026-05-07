@@ -54,15 +54,7 @@ TASKS = [
      "encoding": "unicode_escape", "sep_truth": ",", "sep" :",",
      "match_left_col": "idACM", "match_right_col": "idDBLP",
      "left_cols": ["title", "authors","venue"], "right_cols": ["title","authors","venue"]
-    },
-    
-    {
-     "name": "Scholar-DBLP",
-     "left": "Scholar.csv", "right": "DBLP.csv", "matches": "truth_Scholar_DBLP.csv",
-     "encoding": "unicode_escape", "sep_truth": ",", "sep" :",",
-     "match_left_col": "idScholar", "match_right_col": "idDBLP",
-     "left_cols": ["authors", "title","venue","year"], "right_cols": ["authors","title","venue","year"]
-    },
+    },    
     {
      "name": "Amazon-Google",
      "left": "Amazon.csv", "right": "GoogleProducts.csv", "matches": "truth_amazon_google.csv",
@@ -83,7 +75,14 @@ TASKS = [
      "encoding": "unicode_escape", "sep_truth": ",", "sep" :",",
      "match_left_col": "idScholar", "match_right_col": "idDBLP",
      "left_cols": ["authors", "title","venue","year"], "right_cols": ["authors","title","venue","year"]
-    }
+    },
+    {  "name": "DBLP",
+       "left": "test_dblp_A.txt", "right": "test_dblp_B.txt", "matches": "truth_DBLP.csv",
+       "encoding": "utf-8", "sep_truth": ",", "sep" :",",
+       "match_left_col": "id1", "match_right_col": "id2",
+       "left_cols": ["author1", "author2","title", "year"], "right_cols": ["author1","author2","title","year"]
+  },
+
 ]
 
 # --- HELPER: Create Pos+Neg InputExamples AND track explicitly generated pairs ---
